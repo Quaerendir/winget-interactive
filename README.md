@@ -1,79 +1,80 @@
 # winget-interactive
 
-Interaktywny upgrade pakietów `winget` — pyta **y/n przed każdym**.
+Interactive `winget` package upgrades — **prompts y/n before each one**.
 
-To, czego `winget upgrade --all` nie potrafi: przechodzi po dostępnych
-aktualizacjach jedna po drugiej i czeka na potwierdzenie. Pod spodem moduł COM
-`Microsoft.WinGet.Client` zamiast parsowania tekstowej tabeli — więc działa
-**niezależnie od języka systemu** (żadnego regexa na zlokalizowane nagłówki).
+What `winget upgrade --all` won't do: walk available updates one by one and wait
+for confirmation. Under the hood it uses the `Microsoft.WinGet.Client` COM module
+instead of parsing the text table — so it works **regardless of system language**
+(no regex against localized headers).
 
-Pełza po **PowerShell 5.1 i 7**.
+Runs on **PowerShell 5.1 and 7**.
 
-## Oneliner
+## One-liner
 
-Najprostszy (bez parametrów):
+Simplest (no parameters):
 
 ```powershell
 irm https://raw.githubusercontent.com/Quaerendir/winget-interactive/main/Invoke-WingetInteractive.ps1 | iex
 ```
 
-Z parametrami `irm | iex` **nie zadziała** — `iex` na stringu z blokiem `param()`
-nie przyjmie argumentów. Trzeba przez scriptblock:
+With parameters, `irm | iex` **won't work** — `iex` on a string containing a
+`param()` block can't take arguments. Use the scriptblock form:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Quaerendir/winget-interactive/main/Invoke-WingetInteractive.ps1))) -Mode Silent -Exclude 'Valve.Steam','*Nvidia*'
 ```
 
-Jeśli ExecutionPolicy marudzi:
+If ExecutionPolicy complains:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Quaerendir/winget-interactive/main/Invoke-WingetInteractive.ps1 | iex"
 ```
 
-## Lokalnie
+## Local
 
 ```powershell
 .\Invoke-WingetInteractive.ps1
-.\Invoke-WingetInteractive.ps1 -List                      # dry-run, tylko lista
+.\Invoke-WingetInteractive.ps1 -List                      # dry-run, list only
 .\Invoke-WingetInteractive.ps1 -Mode Silent -LogPath $env:TEMP\winget.log
 .\Invoke-WingetInteractive.ps1 -Exclude 'Mozilla.Firefox','*JetBrains*'
-.\Invoke-WingetInteractive.ps1 -AutoApprove               # jak --all, ale z summary+logiem
+.\Invoke-WingetInteractive.ps1 -AutoApprove               # like --all, but with summary + log
 ```
 
-## W pętli
+## In the loop
 
-Przy każdym pakiecie:
+For each package:
 
-- `y` (lub `t`) — zaktualizuj
-- `n` / Enter — pomiń
-- `a` — zatwierdź ten i całą resztę bez pytania
-- `q` — wyjdź
+- `y` (or `t`) — update
+- `n` / Enter — skip
+- `a` — approve this one and all remaining without asking
+- `q` — quit
 
-## Parametry
+## Parameters
 
-| Param | Opis |
+| Param | Description |
 |---|---|
-| `-Exclude` | Lista ID/Name (wildcardy ok) do pominięcia bez pytania |
-| `-Mode` | `Default` \| `Silent` \| `Interactive` — tryb instalatora. Uwaga: `Interactive` to GUI installera, **nie** pytanie win-geta |
+| `-Exclude` | List of IDs/Names (wildcards ok) to skip without prompting |
+| `-Mode` | `Default` \| `Silent` \| `Interactive` — installer mode. Note: `Interactive` means the installer GUI, **not** a winget prompt |
 | `-Source` | `winget` (default) \| `msstore` \| `All` |
-| `-IncludeUnknown` | Nie pomijaj pakietów z `InstalledVersion = Unknown` |
-| `-AutoApprove` | Leci wszystko bez pytania |
+| `-IncludeUnknown` | Don't skip packages with `InstalledVersion = Unknown` |
+| `-AutoApprove` | Upgrade everything without prompting |
 | `-List` | Dry-run |
-| `-LogPath` | Append log do pliku |
+| `-LogPath` | Append a log to a file |
 
 ## Gotchas
 
-- Pakiety **machine-scope** wymagają elevacji — skrypt ostrzega, jeśli lecisz bez admina.
-- Przy pierwszym uruchomieniu może doinstalować moduł z PSGallery (`-Scope CurrentUser`)
-  + provider NuGet. Wymusza TLS 1.2 (PS 5.1 lubi defaultować na coś starszego).
-- Jeśli `Get-WinGetPackage` rzuca błędem (rozjazd wersji COM vs CLI App Installera),
-  skrypt robi best-effort `Repair-WinGetPackageManager`.
-- Źródło `msstore` bywa kapryśne (agreementy, „Unknown" wersje) — dlatego domyślnie tylko `winget`.
+- **Machine-scope** packages need elevation — the script warns if you run without admin.
+- First run may pull the module from PSGallery (`-Scope CurrentUser`) plus the NuGet
+  provider. It forces TLS 1.2 (PS 5.1 likes to default to something older).
+- If `Get-WinGetPackage` throws (COM vs CLI App Installer version drift), the script
+  attempts a best-effort `Repair-WinGetPackageManager`.
+- The `msstore` source is finicky (agreements, "Unknown" versions) — hence the default
+  is `winget` only.
 
 ## Exit codes
 
-`0` ok · `1` co najmniej jeden update padł · `2` bootstrap modułu padł
+`0` ok · `1` at least one upgrade failed · `2` module bootstrap failed
 
-## Licencja
+## License
 
-MIT — patrz [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

@@ -1,37 +1,37 @@
 <#
 .SYNOPSIS
-    Interaktywny upgrade pakietow winget - pyta y/n przed kazdym.
+    Interactive winget package upgrades - prompts y/n before each one.
 
 .DESCRIPTION
-    Robi to, czego 'winget upgrade --all' nie potrafi: przechodzi po
-    dostepnych aktualizacjach jedna po drugiej i pyta o potwierdzenie.
-    Pod spodem uzywa modulu COM 'Microsoft.WinGet.Client' - zero parsowania
-    tekstowej tabeli, wiec dziala niezaleznie od jezyka systemu (locale-proof).
+    Does what 'winget upgrade --all' won't: walks available updates one by one
+    and waits for confirmation. Under the hood it uses the COM module
+    'Microsoft.WinGet.Client' - no text-table parsing, so it works regardless of
+    system language (locale-proof).
 
-    Pelza po PS 5.1 i PS 7.
+    Runs on PS 5.1 and PS 7.
 
 .PARAMETER Exclude
-    Lista ID (wildcardy ok) do pominiecia bez pytania.
-    np. -Exclude 'Mozilla.Firefox','*JetBrains*'
+    List of IDs (wildcards ok) to skip without prompting.
+    e.g. -Exclude 'Mozilla.Firefox','*JetBrains*'
 
 .PARAMETER Mode
-    Tryb instalatora przekazany do Update-WinGetPackage: Default | Silent | Interactive.
-    UWAGA: 'Interactive' = GUI instalatora, NIE pytanie win-geta.
+    Installer mode passed to Update-WinGetPackage: Default | Silent | Interactive.
+    NOTE: 'Interactive' = the installer GUI, NOT a winget prompt.
 
 .PARAMETER Source
-    winget | msstore | All. Domyslnie 'winget' (store apps potrafia robic syf).
+    winget | msstore | All. Default 'winget' (store apps can be messy).
 
 .PARAMETER IncludeUnknown
-    Nie pomijaj pakietow z InstalledVersion = 'Unknown'.
+    Don't skip packages with InstalledVersion = 'Unknown'.
 
 .PARAMETER AutoApprove
-    Bez pytania - leci wszystko (jak --all, ale z ladnym summary i logiem).
+    No prompting - upgrade everything (like --all, but with a nice summary and log).
 
 .PARAMETER List
-    Dry-run. Tylko wypisz co jest do update'u, nic nie ruszaj.
+    Dry-run. Just print what would be updated, touch nothing.
 
 .PARAMETER LogPath
-    Sciezka do pliku logu (append). Bez tego brak logowania na dysk.
+    Path to a log file (append). Without it, no on-disk logging.
 
 .EXAMPLE
     .\Invoke-WingetInteractive.ps1
@@ -40,7 +40,7 @@
     .\Invoke-WingetInteractive.ps1 -Mode Silent -Exclude 'Valve.Steam','*Nvidia*' -LogPath $env:TEMP\winget.log
 
 .NOTES
-    Author : Quaerendir
+    Author  : Quaerendir
     License : MIT
 #>
 [CmdletBinding()]
@@ -76,19 +76,19 @@ function Test-Admin {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# ---------- bootstrap modulu ----------
+# ---------- module bootstrap ----------
 [Net.ServicePointManager]::SecurityProtocol = `
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {
-    Write-Host "[*] Brak modulu Microsoft.WinGet.Client - instaluje (CurrentUser)..." -ForegroundColor Yellow
+    Write-Host "[*] Module Microsoft.WinGet.Client not found - installing (CurrentUser)..." -ForegroundColor Yellow
     try {
         if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue)) {
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
         }
         Install-Module -Name Microsoft.WinGet.Client -Scope CurrentUser -Force -AllowClobber -Repository PSGallery
     } catch {
-        Write-Host "[!] Instalacja modulu padla: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[!] Module install failed: $($_.Exception.Message)" -ForegroundColor Red
         exit 2
     }
 }
@@ -99,18 +99,18 @@ Import-Module Microsoft.WinGet.Client
 try {
     $null = Get-WinGetPackage -ErrorAction Stop | Select-Object -First 1
 } catch {
-    Write-Host "[!] Get-WinGetPackage zwraca blad - probuje Repair-WinGetPackageManager..." -ForegroundColor Yellow
+    Write-Host "[!] Get-WinGetPackage errored - trying Repair-WinGetPackageManager..." -ForegroundColor Yellow
     try { Repair-WinGetPackageManager -ErrorAction Stop } catch {
-        Write-Host "[!] Repair nie pomogl. Sprobuj recznie (moze wymagac admina)." -ForegroundColor Red
+        Write-Host "[!] Repair didn't help. Try manually (may need admin)." -ForegroundColor Red
     }
 }
 
 if (-not (Test-Admin)) {
-    Write-Host "[i] Dzialasz bez elevacji - pakiety machine-scope moga sie nie zaktualizowac." -ForegroundColor DarkYellow
+    Write-Host "[i] Running without elevation - machine-scope packages may fail to update." -ForegroundColor DarkYellow
 }
 
-# ---------- zbierz updaty ----------
-Write-Host "[*] Skanuje dostepne aktualizacje..." -ForegroundColor Cyan
+# ---------- collect updates ----------
+Write-Host "[*] Scanning for available updates..." -ForegroundColor Cyan
 
 $all = Get-WinGetPackage | Where-Object { $_.IsUpdateAvailable }
 
@@ -121,19 +121,19 @@ if (-not $IncludeUnknown) {
     $all = $all | Where-Object { $_.InstalledVersion -and $_.InstalledVersion -ne 'Unknown' }
 }
 
-# exclude wildcards po Id i Name
+# exclude wildcards by Id and Name
 $pkgs = $all | Where-Object {
     $pkg = $_
     -not ($Exclude | Where-Object { $pkg.Id -like $_ -or $pkg.Name -like $_ })
 }
 
 if (-not $pkgs) {
-    Write-Host "[+] Brak aktualizacji (po filtrach). Nic do roboty." -ForegroundColor Green
+    Write-Host "[+] No updates (after filters). Nothing to do." -ForegroundColor Green
     exit 0
 }
 
 $total = @($pkgs).Count
-Write-Host ("[+] Znaleziono {0} aktualizacji.`n" -f $total) -ForegroundColor Green
+Write-Host ("[+] Found {0} update(s).`n" -f $total) -ForegroundColor Green
 
 if ($List) {
     $pkgs | Sort-Object Name | Format-Table `
@@ -144,7 +144,7 @@ if ($List) {
     exit 0
 }
 
-# ---------- petla ----------
+# ---------- loop ----------
 $approveAll  = $AutoApprove.IsPresent
 $rebootFlag  = $false
 $stats = [ordered]@{ Updated = 0; Skipped = 0; Failed = 0 }
@@ -160,15 +160,15 @@ foreach ($pkg in ($pkgs | Sort-Object Name)) {
     if (-not $approveAll) {
         $ans = Read-Host "      Update? (y)es / (n)o / (a)ll / (q)uit"
         if ($ans -match '^[qQ]') {
-            Write-Host "[*] Przerwano przez uzytkownika." -ForegroundColor Yellow
-            break                                          # wychodzi z foreach
+            Write-Host "[*] Aborted by user." -ForegroundColor Yellow
+            break                                          # exit foreach
         }
-        elseif ($ans -match '^[aA]') { $approveAll = $true }   # zatwierdz reszte
-        elseif ($ans -match '^[yYtT]') { }                     # leci do update
+        elseif ($ans -match '^[aA]') { $approveAll = $true }   # approve the rest
+        elseif ($ans -match '^[yYtT]') { }                     # proceed to update
         else {
             $stats.Skipped++
-            Write-Host "      -> pominiete`n" -ForegroundColor DarkGray
-            continue                                       # nastepny pakiet
+            Write-Host "      -> skipped`n" -ForegroundColor DarkGray
+            continue                                       # next package
         }
     }
 
@@ -196,7 +196,7 @@ Write-Host "----------------------------------------" -ForegroundColor DarkGray
 Write-Host ("Updated: {0}  Skipped: {1}  Failed: {2}" -f `
     $stats.Updated, $stats.Skipped, $stats.Failed) -ForegroundColor Cyan
 if ($rebootFlag) {
-    Write-Host "[!] Co najmniej jeden pakiet wymaga restartu." -ForegroundColor Yellow
+    Write-Host "[!] At least one package requires a reboot." -ForegroundColor Yellow
 }
 
 if     ($stats.Failed -gt 0) { exit 1 }
