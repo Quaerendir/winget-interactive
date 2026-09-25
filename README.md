@@ -68,6 +68,12 @@ For each package:
   provider. It forces TLS 1.2 (PS 5.1 likes to default to something older).
 - If `Get-WinGetPackage` throws (COM vs CLI App Installer version drift), the script
   attempts a best-effort `Repair-WinGetPackageManager`.
+- **Elevated session + App Installer 1.29.380** = `Get-WinGetPackage` throws
+  `Failed to create instance: -2147023174` (0x800706BA). Known regression,
+  [winget-cli#6560](https://github.com/microsoft/winget-cli/issues/6560), still open as of
+  2026-09-25. `Repair-WinGetPackageManager` won't fix it. Workaround: run non-elevated
+  (user-scope packages only), or downgrade: `winget install Microsoft.AppInstaller
+  --version 1.29.280 --force` (from a non-elevated shell).
 - The `msstore` source is finicky (agreements, "Unknown" versions) — hence the default
   is `winget` only.
 
