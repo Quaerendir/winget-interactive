@@ -59,7 +59,8 @@ param(
     [string]$LogPath
 )
 
-$ErrorActionPreference = 'Stop'
+# NB: never call 'exit' at script level - under 'irm | iex' it closes the whole
+# PowerShell window. Main returns an exit code; 'exit' is used only for real files.
 
 # ---------- helpers ----------
 function Write-Log {
@@ -76,128 +77,143 @@ function Test-Admin {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# ---------- module bootstrap ----------
-[Net.ServicePointManager]::SecurityProtocol = `
-    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+function Invoke-WingetInteractiveMain {
+    # ---------- module bootstrap ----------
+    [Net.ServicePointManager]::SecurityProtocol = `
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {
-    Write-Host "[*] Module Microsoft.WinGet.Client not found - installing (CurrentUser)..." -ForegroundColor Yellow
-    try {
-        if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue)) {
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+    if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {
+        Write-Host "[*] Module Microsoft.WinGet.Client not found - installing (CurrentUser)..." -ForegroundColor Yellow
+        try {
+            if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue)) {
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+            }
+            Install-Module -Name Microsoft.WinGet.Client -Scope CurrentUser -Force -AllowClobber -Repository PSGallery
+        } catch {
+            Write-Host "[!] Module install failed: $($_.Exception.Message)" -ForegroundColor Red
+            return 2
         }
-        Install-Module -Name Microsoft.WinGet.Client -Scope CurrentUser -Force -AllowClobber -Repository PSGallery
+    }
+
+    # Default Win11 policy (Restricted) blocks the module's Format.ps1xml ->
+    # 'AuthorizationManager check failed'. Relax for this process only.
+    if ((Get-ExecutionPolicy) -in 'Restricted','Undefined','AllSigned') {
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+    }
+    Import-Module Microsoft.WinGet.Client
+
+    # COM/CLI version mismatch -> best-effort repair
+    try {
+        $null = Get-WinGetPackage -ErrorAction Stop | Select-Object -First 1
     } catch {
-        Write-Host "[!] Module install failed: $($_.Exception.Message)" -ForegroundColor Red
-        exit 2
-    }
-}
-
-Import-Module Microsoft.WinGet.Client
-
-# COM/CLI version mismatch -> best-effort repair
-try {
-    $null = Get-WinGetPackage -ErrorAction Stop | Select-Object -First 1
-} catch {
-    Write-Host "[!] Get-WinGetPackage errored - trying Repair-WinGetPackageManager..." -ForegroundColor Yellow
-    try { Repair-WinGetPackageManager -ErrorAction Stop } catch {
-        Write-Host "[!] Repair didn't help. Try manually (may need admin)." -ForegroundColor Red
-    }
-}
-
-if (-not (Test-Admin)) {
-    Write-Host "[i] Running without elevation - machine-scope packages may fail to update." -ForegroundColor DarkYellow
-}
-
-# ---------- collect updates ----------
-Write-Host "[*] Scanning for available updates..." -ForegroundColor Cyan
-
-$all = Get-WinGetPackage | Where-Object { $_.IsUpdateAvailable }
-
-if ($Source -ne 'All') {
-    $all = $all | Where-Object { $_.Source -eq $Source }
-}
-if (-not $IncludeUnknown) {
-    $all = $all | Where-Object { $_.InstalledVersion -and $_.InstalledVersion -ne 'Unknown' }
-}
-
-# exclude wildcards by Id and Name
-$pkgs = $all | Where-Object {
-    $pkg = $_
-    -not ($Exclude | Where-Object { $pkg.Id -like $_ -or $pkg.Name -like $_ })
-}
-
-if (-not $pkgs) {
-    Write-Host "[+] No updates (after filters). Nothing to do." -ForegroundColor Green
-    exit 0
-}
-
-$total = @($pkgs).Count
-Write-Host ("[+] Found {0} update(s).`n" -f $total) -ForegroundColor Green
-
-if ($List) {
-    $pkgs | Sort-Object Name | Format-Table `
-        @{N='Name';E={$_.Name}},
-        @{N='Id';E={$_.Id}},
-        @{N='Installed';E={$_.InstalledVersion}},
-        @{N='Available';E={$_.AvailableVersions[0]}} -AutoSize
-    exit 0
-}
-
-# ---------- loop ----------
-$approveAll  = $AutoApprove.IsPresent
-$rebootFlag  = $false
-$stats = [ordered]@{ Updated = 0; Skipped = 0; Failed = 0 }
-$i = 0
-
-foreach ($pkg in ($pkgs | Sort-Object Name)) {
-    $i++
-    $latest = $pkg.AvailableVersions[0]
-    $head = "[{0}/{1}] {2}" -f $i, $total, $pkg.Name
-    Write-Host $head -ForegroundColor Cyan
-    Write-Host ("      {0}  {1} -> {2}" -f $pkg.Id, $pkg.InstalledVersion, $latest) -ForegroundColor DarkGray
-
-    if (-not $approveAll) {
-        $ans = Read-Host "      Update? (y)es / (n)o / (a)ll / (q)uit"
-        if ($ans -match '^[qQ]') {
-            Write-Host "[*] Aborted by user." -ForegroundColor Yellow
-            break                                          # exit foreach
-        }
-        elseif ($ans -match '^[aA]') { $approveAll = $true }   # approve the rest
-        elseif ($ans -match '^[yYtT]') { }                     # proceed to update
-        else {
-            $stats.Skipped++
-            Write-Host "      -> skipped`n" -ForegroundColor DarkGray
-            continue                                       # next package
+        Write-Host "[!] Get-WinGetPackage errored - trying Repair-WinGetPackageManager..." -ForegroundColor Yellow
+        try { Repair-WinGetPackageManager -ErrorAction Stop } catch {
+            Write-Host "[!] Repair didn't help. Try manually (may need admin)." -ForegroundColor Red
         }
     }
 
-    try {
-        $r = Update-WinGetPackage -Id $pkg.Id -Mode $Mode -ErrorAction Stop
-        if ($r.Status -eq 'Ok') {
-            $stats.Updated++
-            Write-Host "      -> OK`n" -ForegroundColor Green
-            Write-Log ("OK    {0} {1} -> {2}" -f $pkg.Id, $pkg.InstalledVersion, $latest)
-            if ($r.RebootRequired) { $rebootFlag = $true }
-        } else {
+    if (-not (Test-Admin)) {
+        Write-Host "[i] Running without elevation - machine-scope packages may fail to update." -ForegroundColor DarkYellow
+    }
+
+    # ---------- collect updates ----------
+    Write-Host "[*] Scanning for available updates..." -ForegroundColor Cyan
+
+    $all = Get-WinGetPackage | Where-Object { $_.IsUpdateAvailable }
+
+    if ($Source -ne 'All') {
+        $all = $all | Where-Object { $_.Source -eq $Source }
+    }
+    if (-not $IncludeUnknown) {
+        $all = $all | Where-Object { $_.InstalledVersion -and $_.InstalledVersion -ne 'Unknown' }
+    }
+
+    # exclude wildcards by Id and Name
+    $pkgs = $all | Where-Object {
+        $pkg = $_
+        -not ($Exclude | Where-Object { $pkg.Id -like $_ -or $pkg.Name -like $_ })
+    }
+
+    if (-not $pkgs) {
+        Write-Host "[+] No updates (after filters). Nothing to do." -ForegroundColor Green
+        return 0
+    }
+
+    $total = @($pkgs).Count
+    Write-Host ("[+] Found {0} update(s).`n" -f $total) -ForegroundColor Green
+
+    if ($List) {
+        $pkgs | Sort-Object Name | Format-Table `
+            @{N='Name';E={$_.Name}},
+            @{N='Id';E={$_.Id}},
+            @{N='Installed';E={$_.InstalledVersion}},
+            @{N='Available';E={$_.AvailableVersions[0]}} -AutoSize | Out-Host
+        return 0
+    }
+
+    # ---------- loop ----------
+    $approveAll  = $AutoApprove.IsPresent
+    $rebootFlag  = $false
+    $stats = [ordered]@{ Updated = 0; Skipped = 0; Failed = 0 }
+    $i = 0
+
+    foreach ($pkg in ($pkgs | Sort-Object Name)) {
+        $i++
+        $latest = $pkg.AvailableVersions[0]
+        $head = "[{0}/{1}] {2}" -f $i, $total, $pkg.Name
+        Write-Host $head -ForegroundColor Cyan
+        Write-Host ("      {0}  {1} -> {2}" -f $pkg.Id, $pkg.InstalledVersion, $latest) -ForegroundColor DarkGray
+
+        if (-not $approveAll) {
+            $ans = Read-Host "      Update? (y)es / (n)o / (a)ll / (q)uit"
+            if ($ans -match '^[qQ]') {
+                Write-Host "[*] Aborted by user." -ForegroundColor Yellow
+                break                                          # exit foreach
+            }
+            elseif ($ans -match '^[aA]') { $approveAll = $true }   # approve the rest
+            elseif ($ans -match '^[yYtT]') { }                     # proceed to update
+            else {
+                $stats.Skipped++
+                Write-Host "      -> skipped`n" -ForegroundColor DarkGray
+                continue                                       # next package
+            }
+        }
+
+        try {
+            $r = Update-WinGetPackage -Id $pkg.Id -Mode $Mode -ErrorAction Stop
+            if ($r.Status -eq 'Ok') {
+                $stats.Updated++
+                Write-Host "      -> OK`n" -ForegroundColor Green
+                Write-Log ("OK    {0} {1} -> {2}" -f $pkg.Id, $pkg.InstalledVersion, $latest)
+                if ($r.RebootRequired) { $rebootFlag = $true }
+            } else {
+                $stats.Failed++
+                Write-Host ("      -> FAIL ({0})`n" -f $r.Status) -ForegroundColor Red
+                Write-Log ("FAIL  {0} status={1}" -f $pkg.Id, $r.Status)
+            }
+        } catch {
             $stats.Failed++
-            Write-Host ("      -> FAIL ({0})`n" -f $r.Status) -ForegroundColor Red
-            Write-Log ("FAIL  {0} status={1}" -f $pkg.Id, $r.Status)
+            Write-Host ("      -> FAIL: {0}`n" -f $_.Exception.Message) -ForegroundColor Red
+            Write-Log ("FAIL  {0} ex={1}" -f $pkg.Id, $_.Exception.Message)
         }
-    } catch {
-        $stats.Failed++
-        Write-Host ("      -> FAIL: {0}`n" -f $_.Exception.Message) -ForegroundColor Red
-        Write-Log ("FAIL  {0} ex={1}" -f $pkg.Id, $_.Exception.Message)
     }
+
+    # ---------- summary ----------
+    Write-Host "----------------------------------------" -ForegroundColor DarkGray
+    Write-Host ("Updated: {0}  Skipped: {1}  Failed: {2}" -f `
+        $stats.Updated, $stats.Skipped, $stats.Failed) -ForegroundColor Cyan
+    if ($rebootFlag) {
+        Write-Host "[!] At least one package requires a reboot." -ForegroundColor Yellow
+    }
+
+    if ($stats.Failed -gt 0) { return 1 }
+    return 0
 }
 
-# ---------- summary ----------
-Write-Host "----------------------------------------" -ForegroundColor DarkGray
-Write-Host ("Updated: {0}  Skipped: {1}  Failed: {2}" -f `
-    $stats.Updated, $stats.Skipped, $stats.Failed) -ForegroundColor Cyan
-if ($rebootFlag) {
-    Write-Host "[!] At least one package requires a reboot." -ForegroundColor Yellow
-}
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Stop'
+try { $code = @(Invoke-WingetInteractiveMain)[-1] }
+finally { $ErrorActionPreference = $prevEAP }
 
-if     ($stats.Failed -gt 0) { exit 1 }
-else   { exit 0 }
+if ($PSCommandPath) { exit $code }          # real .ps1 file: propagate exit code
+else { $global:LASTEXITCODE = $code }       # iex / scriptblock: don't kill the host
