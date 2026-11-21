@@ -68,12 +68,22 @@ For each package:
   provider. It forces TLS 1.2 (PS 5.1 likes to default to something older).
 - If `Get-WinGetPackage` throws (COM vs CLI App Installer version drift), the script
   attempts a best-effort `Repair-WinGetPackageManager`.
-- **Elevated session + App Installer 1.29.380** = `Get-WinGetPackage` throws
-  `Failed to create instance: -2147023174` (0x800706BA). Known regression,
-  [winget-cli#6560](https://github.com/microsoft/winget-cli/issues/6560), still open as of
-  2026-09-25. `Repair-WinGetPackageManager` won't fix it. Workaround: run non-elevated
-  (user-scope packages only), or downgrade: `winget install Microsoft.AppInstaller
-  --version 1.29.280 --force` (from a non-elevated shell).
+- **`Failed to create instance: -2147023174` (0x800706BA)** from `Get-WinGetPackage`
+  almost always means the `Microsoft.WinGet.Client` module is **older than the installed
+  winget** (App Installer updates itself, the PowerShell module doesn't). The script
+  now compares the two on start and updates the module (`-MinimumVersion` = winget's
+  version, CurrentUser scope) when it lags. Verified in an elevated session: App Installer
+  1.29.380 + module 1.28.240 fails; the same winget with module 1.29.380 works.
+  `Repair-WinGetPackageManager` does **not** fix this. Manual fix:
+  `Update-Module Microsoft.WinGet.Client -Force`. An old version left on disk is
+  harmless (the newest is loaded); remove it with `Uninstall-Module ... -RequiredVersion`
+  from a fresh shell, since a running session locks the old DLL.
+  If the module is already current and the error persists, see the possibly related
+  [winget-cli#6560](https://github.com/microsoft/winget-cli/issues/6560); workaround:
+  run non-elevated (user-scope packages only), or downgrade:
+  `winget install Microsoft.AppInstaller --version 1.29.280 --force` (non-elevated shell).
+- If the gallery has no module version matching your winget yet, the update fails with a
+  warning and the script carries on with the installed module.
 - The `msstore` source is finicky (agreements, "Unknown" versions) — hence the default
   is `winget` only.
 

@@ -77,21 +77,63 @@ function Test-Admin {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-InstalledWinGetModuleVersion {
+    $m = Get-Module -ListAvailable -Name Microsoft.WinGet.Client |
+        Sort-Object Version -Descending | Select-Object -First 1
+    if ($m) { $m.Version }
+}
+
+# Version of the winget CLI (matches the Microsoft.WinGet.Client numbering), or $null.
+function Get-WinGetCliVersion {
+    try {
+        $raw = & winget --version 2>$null | Select-Object -First 1
+        if ($raw -match '(\d+\.\d+\.\d+)') { return [version]$Matches[1] }
+    } catch { }
+    $null
+}
+
+function Install-WinGetClientModule {
+    param([string]$MinimumVersion)
+    if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue)) {
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+    }
+    $install = @{
+        Name = 'Microsoft.WinGet.Client'; Scope = 'CurrentUser'
+        Force = $true; AllowClobber = $true; Repository = 'PSGallery'
+    }
+    if ($MinimumVersion) { $install.MinimumVersion = $MinimumVersion }
+    Install-Module @install
+}
+
 function Invoke-WingetInteractiveMain {
     # ---------- module bootstrap ----------
     [Net.ServicePointManager]::SecurityProtocol = `
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {
+    $modVer = Get-InstalledWinGetModuleVersion
+    if (-not $modVer) {
         Write-Host "[*] Module Microsoft.WinGet.Client not found - installing (CurrentUser)..." -ForegroundColor Yellow
-        try {
-            if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue)) {
-                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
-            }
-            Install-Module -Name Microsoft.WinGet.Client -Scope CurrentUser -Force -AllowClobber -Repository PSGallery
-        } catch {
+        try { Install-WinGetClientModule }
+        catch {
             Write-Host "[!] Module install failed: $($_.Exception.Message)" -ForegroundColor Red
             return 2
+        }
+    }
+    else {
+        # Module older than the winget CLI (App Installer auto-updates, the module
+        # doesn't) -> COM activation fails: 'Failed to create instance: -2147023174'.
+        $cliVer = Get-WinGetCliVersion
+        if ($cliVer -and $modVer -lt $cliVer) {
+            Write-Host ("[*] Microsoft.WinGet.Client {0} is older than winget {1} - updating (CurrentUser)..." -f $modVer, $cliVer) -ForegroundColor Yellow
+            try {
+                Install-WinGetClientModule -MinimumVersion $cliVer.ToString()
+                # a stale copy may already be loaded in this session - drop it so the new one is imported
+                Remove-Module Microsoft.WinGet.Client -Force -ErrorAction SilentlyContinue
+            } catch {
+                # not fatal: gallery may lag behind winget, or we may be offline
+                Write-Host "[!] Module update failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "    Continuing with the installed version; it may not work with this winget." -ForegroundColor Yellow
+            }
         }
     }
 
